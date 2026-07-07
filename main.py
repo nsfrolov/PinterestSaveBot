@@ -2,8 +2,10 @@ import sqlite3
 import aiohttp
 import re
 from aiogram import Bot, Dispatcher, F
-from aiogram.types import Message, BufferedInputFile
+from aiogram.types import Message, BufferedInputFile, Update
 from aiogram.filters import CommandStart
+from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
+from aiohttp import web
 import asyncio
 import logging
 import sys
@@ -11,10 +13,16 @@ import traceback
 import ssl
 import json
 import os
+
 API_TOKEN = "7715952986:AAEgHLn4HJMXNuQvtf8NusrsYAz28IJilZ8"
 
+# --- Настройка ---
+WEBHOOK_HOST = os.getenv("WEBHOOK_HOST", "https://pinterest-save-bot-btcv-idlyx9eoq.vercel.app")  # Замените на ваш URL
+WEBHOOK_PATH = "/webhook"
+WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "your-secret-key")  # Опционально
+BASE_WEBHOOK_URL = f"{WEBHOOK_HOST}{WEBHOOK_PATH}"
+
 # --- Настройка логгера ---
-# Создаем директорию для данных, если она не существует
 data_dir = "data"
 os.makedirs(data_dir, exist_ok=True)
 
@@ -28,13 +36,12 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Имя файла базы данных в директории data
 DB_NAME = os.path.join(data_dir, "users.db")
 
 bot = Bot(token=API_TOKEN)
 dp = Dispatcher()
 
-# --- Настройка SSL контекста для обхода проблем с сертификатами ---
+# --- SSL контекст ---
 ssl_context = ssl.create_default_context()
 ssl_context.check_hostname = False
 ssl_context.verify_mode = ssl.CERT_NONE
@@ -100,7 +107,6 @@ def find_media_in_json_objects(json_objects):
     image_urls = []
     
     for obj in json_objects:
-        # Рекурсивно ищем в объекте
         def search_dict(d):
             if isinstance(d, dict):
                 for key, value in d.items():
@@ -144,31 +150,22 @@ async def start_cmd(message: Message):
         logger.error(f"Ошибка в команде /start: {e}")
         await message.answer("⚠️ Произошла ошибка при обработке команды. Мы работаем над решением проблемы.")
 
-# Обработчик для всех поддерживаемых ссылок Pinterest
-# Обновленное регулярное выражение для поиска ссылок в любом месте текста
 @dp.message(F.text)
 async def handle_pinterest(message: Message):
-    # Ищем ссылки Pinterest в тексте сообщения
-    # Исправленное регулярное выражение для корректного извлечения ссылок
     pinterest_urls = re.findall(r"https?://(?:[a-z]+\.)?pinterest\.com/pin/[\w\-]+|https?://pin\.it/[\w\-]+", message.text)
     
     if not pinterest_urls:
-        # Если ссылки не найдены, не обрабатываем сообщение
         return
     
-    # Берем первую найденную ссылку
     url = pinterest_urls[0]
     
-    # Проверяем, что URL не пустой
     if not url:
         return
     
-    # Сохраняем сообщение "Скачиваю" чтобы удалить его позже
     downloading_message = await message.answer("⏳ Скачиваю...")
     logger.info(f"Получена ссылка от пользователя {message.from_user.username} ({message.from_user.id}): {url}")
 
     try:
-        # Создаем заголовки для имитации браузера
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
@@ -177,7 +174,6 @@ async def handle_pinterest(message: Message):
             'Connection': 'keep-alive',
         }
         
-        # Создаем клиентскую сессию с отключенной проверкой SSL и заголовками
         async with aiohttp.ClientSession(
             connector=aiohttp.TCPConnector(ssl=ssl_context),
             headers=headers
@@ -187,77 +183,57 @@ async def handle_pinterest(message: Message):
                     content = await resp.text()
                     logger.info(f"Получен HTML контент размером {len(content)} символов")
 
-                    # Извлекаем все JSON объекты из контента
                     json_objects = extract_json_objects(content)
                     logger.info(f"Найдено {len(json_objects)} JSON объектов в контенте")
                     
-                    # Ищем медиа ссылки в JSON объектах
                     json_video_urls, json_image_urls = find_media_in_json_objects(json_objects)
                     logger.info(f"Найдено {len(json_video_urls)} видео и {len(json_image_urls)} изображений в JSON объектах")
                     
-                    # Также ищем медиа ссылки с помощью регулярных выражений
-                    # Проверяем наличие видео
                     video_urls = []
-                    
-                    # Добавляем видео ссылки из JSON
                     video_urls.extend([url.replace('\\u002F', '/').replace('\\', '') for url in json_video_urls])
                     
-                    # Метод 1: Ищем прямые ссылки на видео
                     regex_video_matches = re.findall(r'"videoUrl":"([^"]*)"', content)
                     video_urls.extend([url.replace('\\u002F', '/').replace('\\', '') for url in regex_video_matches])
-                    logger.info(f"Найдено {len(regex_video_matches)} видео ссылок методом регулярных выражений")
                     
-                    # Метод 2: Ищем видео в тегах video
                     video_tag_matches = re.findall(r'<video[^>]*src="([^"]*)"', content)
                     video_urls.extend(video_tag_matches)
-                    logger.info(f"Найдено {len(video_tag_matches)} видео ссылок в тегах video")
                     
-                    # Метод 3: Ищем видео в атрибутах data-video-url
                     data_video_matches = re.findall(r'data-video-url="([^"]*)"', content)
                     video_urls.extend(data_video_matches)
-                    logger.info(f"Найдено {len(data_video_matches)} видео ссылок в атрибутах data-video-url")
                     
                     if video_urls:
                         logger.info(f"Всего найдено {len(video_urls)} потенциальных видео ссылок")
                         
-                        # Фильтруем ссылки, исключаем m3u8
                         filtered_video_urls = [url for url in video_urls if not url.endswith('.m3u8')]
                         logger.info(f"После фильтрации осталось {len(filtered_video_urls)} видео ссылок")
                         
                         if filtered_video_urls:
-                            # Берем первую найденную ссылку на видео
                             video_url_str = filtered_video_urls[0]
                             logger.info(f"Используем первую ссылку: {video_url_str}")
                             
                             logger.info("Скачиваем видео...")
                             
-                            # Для видео используем потоковую загрузку
                             async with session.get(video_url_str, ssl=ssl_context, headers=headers) as vresp:
                                 logger.info(f"Статус ответа видео: {vresp.status}")
                                 if vresp.status == 200:
-                                    # Получаем размер контента если доступен
                                     content_length = vresp.headers.get('Content-Length')
                                     if content_length:
                                         logger.info(f"Размер видео: {content_length} байт")
                                     
-                                    # Получаем тип контента
                                     content_type = vresp.headers.get('Content-Type')
                                     logger.info(f"Тип контента: {content_type}")
                                     
-                                    # Читаем данные по частям для больших файлов
                                     video_data = bytearray()
                                     chunk_count = 0
                                     async for chunk in vresp.content.iter_chunked(8192):
                                         video_data.extend(chunk)
                                         chunk_count += 1
-                                        if chunk_count % 100 == 0:  # Логируем каждые 100 чанков
+                                        if chunk_count % 100 == 0:
                                             logger.info(f"Загружено {chunk_count} чанков, {len(video_data)} байт")
                                     
-                                    # Проверяем, что данные получены
                                     if len(video_data) > 0:
                                         logger.info(f"Видео скачано, размер: {len(video_data)} байт")
                                         
-                                        # Определяем расширение файла по типу контента
                                         file_extension = "mp4"
                                         if content_type:
                                             if "video/mp4" in content_type:
@@ -271,7 +247,6 @@ async def handle_pinterest(message: Message):
                                         
                                         video = BufferedInputFile(video_data, filename=f"pinterest.{file_extension}")
                                         await bot.send_video(message.chat.id, video)
-                                        # Удаляем сообщение "Скачиваю"
                                         await bot.delete_message(message.chat.id, downloading_message.message_id)
                                         logger.info("Видео успешно отправлено и сообщение удалено")
                                         return
@@ -286,26 +261,17 @@ async def handle_pinterest(message: Message):
                     else:
                         logger.info("Видео ссылки не найдены")
 
-                    # Проверяем наличие картинки
                     img_urls = []
-                    
-                    # Добавляем изображения из JSON
                     img_urls.extend([url.replace('\\u002F', '/').replace('\\', '') for url in json_image_urls])
                     
-                    # Метод 1: Ищем прямые ссылки на изображения
                     regex_img_matches = re.findall(r'"url":"([^"]*\.jpg[^"]*)"', content)
                     img_urls.extend([url.replace('\\u002F', '/').replace('\\', '') for url in regex_img_matches])
-                    logger.info(f"Найдено {len(regex_img_matches)} изображений методом регулярных выражений")
                     
-                    # Метод 2: Ищем изображения в imageUrls
                     image_urls_matches = re.findall(r'"imageUrls":\["([^"]*)"\]', content)
                     img_urls.extend([url.replace('\\u002F', '/').replace('\\', '') for url in image_urls_matches])
-                    logger.info(f"Найдено {len(image_urls_matches)} изображений в imageUrls")
                     
-                    # Метод 3: Ищем изображения в тегах img
                     img_tag_matches = re.findall(r'<img[^>]*src="([^"]*)"', content)
                     img_urls.extend(img_tag_matches)
-                    logger.info(f"Найдено {len(img_tag_matches)} изображений в тегах img")
                     
                     if img_urls:
                         logger.info(f"Всего найдено {len(img_urls)} потенциальных изображений")
@@ -316,7 +282,6 @@ async def handle_pinterest(message: Message):
                         async with session.get(img_url_str, ssl=ssl_context, headers=headers) as iresp:
                             logger.info(f"Статус ответа изображения: {iresp.status}")
                             if iresp.status == 200:
-                                # Получаем тип контента
                                 content_type = iresp.headers.get('Content-Type')
                                 logger.info(f"Тип контента изображения: {content_type}")
                                 
@@ -324,7 +289,6 @@ async def handle_pinterest(message: Message):
                                 if len(img_data) > 0:
                                     logger.info(f"Изображение скачано, размер: {len(img_data)} байт")
                                     
-                                    # Определяем расширение файла по типу контента
                                     file_extension = "jpg"
                                     if content_type:
                                         if "image/jpeg" in content_type:
@@ -338,7 +302,6 @@ async def handle_pinterest(message: Message):
                                     
                                     photo = BufferedInputFile(img_data, filename=f"pinterest.{file_extension}")
                                     await bot.send_photo(message.chat.id, photo)
-                                    # Удаляем сообщение "Скачиваю"
                                     await bot.delete_message(message.chat.id, downloading_message.message_id)
                                     logger.info("Изображение успешно отправлено и сообщение удалено")
                                     return
@@ -352,47 +315,90 @@ async def handle_pinterest(message: Message):
                         logger.info("Изображения не найдены")
 
                     await message.answer("❌ Не удалось найти медиа в этой ссылке.")
-                    # Удаляем сообщение "Скачиваю" даже если медиа не найдено
                     await bot.delete_message(message.chat.id, downloading_message.message_id)
                     logger.warning("Не удалось найти медиа в ссылке, сообщение удалено")
                 else:
                     await message.answer("❌ Ошибка при получении данных с Pinterest.")
-                    # Удаляем сообщение "Скачиваю" при ошибке
                     await bot.delete_message(message.chat.id, downloading_message.message_id)
                     logger.error(f"Ошибка при получении данных с Pinterest: статус {resp.status}")
     except aiohttp.ClientError as e:
         error_msg = "⚠️ Ошибка сети при подключении к Pinterest. Попробуйте позже."
         await message.answer(error_msg)
-        # Удаляем сообщение "Скачиваю" при ошибке
         await bot.delete_message(message.chat.id, downloading_message.message_id)
         logger.error(f"Ошибка сети при подключении к Pinterest: {e}")
     except Exception as e:
         error_msg = f"⚠️ Ошибка: {e}"
         await message.answer(error_msg)
-        # Удаляем сообщение "Скачиваю" при ошибке
         await bot.delete_message(message.chat.id, downloading_message.message_id)
         logger.error(f"Ошибка при обработке ссылки Pinterest: {e}")
         logger.error(traceback.format_exc())
 
-# --- Основная функция с постоянным сканированием ---
-async def main():
+# --- Настройка веб-хука ---
+async def on_startup():
+    """Устанавливает веб-хук при запуске приложения"""
     try:
-        init_db()
-        logger.info("Бот запущен и готов к работе")
+        await bot.set_webhook(
+            url=BASE_WEBHOOK_URL,
+            secret_token=WEBHOOK_SECRET,
+            drop_pending_updates=True  # Очищает очередь обновлений
+        )
+        logger.info(f"Веб-хук установлен на {BASE_WEBHOOK_URL}")
+    except Exception as e:
+        logger.error(f"Ошибка при установке веб-хука: {e}")
+        raise
+
+async def on_shutdown():
+    """Закрывает сессию бота при остановке приложения"""
+    await bot.session.close()
+    logger.info("Сессия бота закрыта")
+
+# --- Создание приложения aiohttp ---
+def create_app() -> web.Application:
+    """Создает и настраивает веб-приложение"""
+    app = web.Application()
+    
+    # Создаем обработчик веб-хука
+    webhook_handler = SimpleRequestHandler(
+        dispatcher=dp,
+        bot=bot,
+        secret_token=WEBHOOK_SECRET,
+    )
+    
+    # Настраиваем маршруты
+    webhook_handler.register(app, path=WEBHOOK_PATH)
+    setup_application(app, dp, bot=bot)
+    
+    # Добавляем обработчики событий старта и остановки
+    app.on_startup.append(on_startup)
+    app.on_shutdown.append(on_shutdown)
+    
+    # Добавляем корневой маршрут для проверки работоспособности
+    async def health_check(request):
+        return web.Response(text="Bot is running!")
+    
+    app.router.add_get("/", health_check)
+    app.router.add_get("/health", health_check)
+    
+    return app
+
+# --- Экспортируем приложение для хостинга ---
+app = create_app()
+application = app  # Некоторые хостинги ожидают именно application
+
+# --- Точка входа для локального запуска ---
+if __name__ == "__main__":
+    # Инициализируем базу данных
+    init_db()
+    
+    # Для локального запуска используем polling
+    async def main():
+        logger.info("Запуск бота в режиме polling...")
         await dp.start_polling(bot)
+    
+    try:
+        asyncio.run(main())
     except KeyboardInterrupt:
         logger.info("Бот остановлен пользователем")
     except Exception as e:
-        logger.error(f"Критическая ошибка в работе бота: {e}")
-        logger.error(traceback.format_exc())
-        # Попытка перезапуска через 5 секунд
-        logger.info("Попытка перезапуска через 5 секунд...")
-        await asyncio.sleep(5)
-        await main()
-
-if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except Exception as e:
-        logger.error(f"Фатальная ошибка при запуске бота: {e}")
+        logger.error(f"Фатальная ошибка: {e}")
         logger.error(traceback.format_exc())
