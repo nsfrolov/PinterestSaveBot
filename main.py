@@ -13,13 +13,20 @@ import traceback
 import ssl
 import json
 import os
+from dotenv import load_dotenv
 
-API_TOKEN = "7715952986:AAEgHLn4HJMXNuQvtf8NusrsYAz28IJilZ8"
+# Загружаем переменные окружения из .env файла
+load_dotenv()
 
-# --- Настройка ---
-WEBHOOK_HOST = os.getenv("WEBHOOK_HOST", "https://pinterest-save-bot-btcv-idlyx9eoq.vercel.app")  # Замените на ваш URL
+# --- Настройка из переменных окружения ---
+API_TOKEN = os.getenv("BOT_TOKEN")
+if not API_TOKEN:
+    raise ValueError("BOT_TOKEN не найден в переменных окружения!")
+
+# URL вашего приложения на Vercel
+WEBHOOK_HOST = os.getenv("WEBHOOK_HOST", "https://pinterest-save-bot-git-main-nikita1601frolov-2874s-projects.vercel.app")
 WEBHOOK_PATH = "/webhook"
-WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "your-secret-key")  # Опционально
+WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "your-secret-key-here")  # Опционально, но рекомендуется
 BASE_WEBHOOK_URL = f"{WEBHOOK_HOST}{WEBHOOK_PATH}"
 
 # --- Настройка логгера ---
