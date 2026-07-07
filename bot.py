@@ -11,7 +11,7 @@ import traceback
 import ssl
 import json
 import os
-from config import API_TOKEN
+API_TOKEN = "7715952986:AAEgHLn4HJMXNuQvtf8NusrsYAz28IJilZ8"
 
 # --- Настройка логгера ---
 # Создаем директорию для данных, если она не существует
